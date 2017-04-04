@@ -16,6 +16,7 @@ class EventLoop:
 
     def __init__(self, len=42):
         self.q = utimeq.utimeq(len)
+        self.lpq = utimeq.utimeq(len)
 
     def time(self):
         return time.ticks_ms()
@@ -24,6 +25,12 @@ class EventLoop:
         # CPython 3.4.2
         self.call_later_ms_(0, coro)
         # CPython asyncio incompatibility: we don't return Task object
+
+    def call_lp_(self, callback, args=()):
+        time = self.time()
+        if __debug__ and DEBUG:
+            log.debug("Scheduling LP %s", (time, callback, args))
+        self.lpq.push(time, callback, args)
 
     def call_soon(self, callback, *args):
         self.call_at(self.time(), callback, *args)
@@ -53,6 +60,7 @@ class EventLoop:
 
     def run_forever(self):
         cur_task = [0, 0, 0]
+        cur_lp_task = [0, 0, 0]
         while True:
             if self.q:
                 self.q.pop(cur_task)
@@ -65,6 +73,11 @@ class EventLoop:
                 tnow = self.time()
                 delay = time.ticks_diff(t, tnow)
                 if delay > 0:
+                    if self.lpq:
+                        self.q.push(t, cb, args)
+                        self.lpq.pop(cur_lp_task)
+                        self.q.push(self.time(), cur_lp_task[1], cur_lp_task[2])
+                        continue
                     self.wait(delay)
             else:
                 self.wait(-1)
@@ -109,7 +122,7 @@ class EventLoop:
                             assert False, "Unknown syscall yielded: %r (of type %r)" % (ret, type(ret))
                     elif isinstance(ret, type_gen):
                         self.call_soon(ret)
-                    elif isinstance(ret, int):
+                    elif isinstance(ret, int) or isinstance(ret, bool): # Return bool for low priority
                         # Delay
                         delay = ret
                     elif ret is None:
@@ -121,7 +134,10 @@ class EventLoop:
                     if __debug__ and DEBUG:
                         log.debug("Coroutine finished: %s", cb)
                     continue
-                self.call_later_ms_(delay, cb, args)
+                if isinstance(delay, int):
+                    self.call_later_ms_(delay, cb, args)
+                else:
+                    self.call_lp_(cb, args)
 
     def run_until_complete(self, coro):
         def _run_and_stop():
