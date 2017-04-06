@@ -60,7 +60,6 @@ class EventLoop:
 
     def run_forever(self):
         cur_task = [0, 0, 0]
-        cur_lp_task = [0, 0, 0]
         while True:
             if self.q:
                 self.q.pop(cur_task)
@@ -75,14 +74,20 @@ class EventLoop:
                 if delay > 0:
                     if self.lpq:
                         self.q.push(t, cb, args)
-                        self.lpq.pop(cur_lp_task)
-                        self.q.push(self.time(), cur_lp_task[1], cur_lp_task[2])
-                        continue
-                    self.wait(delay)
+                        self.lpq.pop(cur_task)
+                        cb = cur_task[1]
+                        args = cur_task[2]
+                    else:
+                        self.wait(delay)
             else:
-                self.wait(-1)
-                # Assuming IO completion scheduled some tasks
-                continue
+                if self.lpq:
+                    self.lpq.pop(cur_task)
+                    cb = cur_task[1]
+                    args = cur_task[2]
+                else:
+                    self.wait(-1)
+                    # Assuming IO completion scheduled some tasks
+                    continue
             if callable(cb):
                 cb(*args)
             else:
@@ -122,9 +127,12 @@ class EventLoop:
                             assert False, "Unknown syscall yielded: %r (of type %r)" % (ret, type(ret))
                     elif isinstance(ret, type_gen):
                         self.call_soon(ret)
-                    elif isinstance(ret, int) or isinstance(ret, bool): # Return bool for low priority
+                    elif isinstance(ret, int):
                         # Delay
                         delay = ret
+                    elif ret is low_priority:
+                        self.call_lp_(cb, args)
+                        continue
                     elif ret is None:
                         # Just reschedule
                         pass
@@ -134,10 +142,7 @@ class EventLoop:
                     if __debug__ and DEBUG:
                         log.debug("Coroutine finished: %s", cb)
                     continue
-                if isinstance(delay, int):
-                    self.call_later_ms_(delay, cb, args)
-                else:
-                    self.call_lp_(cb, args)
+                self.call_later_ms_(delay, cb, args)
 
     def run_until_complete(self, coro):
         def _run_and_stop():
@@ -182,6 +187,12 @@ class IOReadDone(SysCall1):
 class IOWriteDone(SysCall1):
     pass
 
+class LowPriority():
+    def __iter__(self):
+        yield self
+
+# Singleton awaitable
+low_priority = LowPriority()
 
 _event_loop = None
 _event_loop_class = EventLoop
