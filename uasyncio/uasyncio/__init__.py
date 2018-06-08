@@ -14,46 +14,47 @@ def set_debug(val):
         import logging
         log = logging.getLogger("uasyncio")
 
-
+# add_writer causes read failure if passed the same sock instance as was passed
+# to add_reader. Cand we fix this by maintaining two object maps?
 class PollEventLoop(EventLoop):
 
     def __init__(self, runq_len=16, waitq_len=16):
         EventLoop.__init__(self, runq_len, waitq_len)
         self.poller = select.poll()
-        self.objmap = {}
+        self.objmap = [{}, {}]  # [Read, Write]
 
     def add_reader(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_reader%s", (sock, cb, args))
+        self.poller.register(sock, select.POLLIN)
         if args:
-            self.poller.register(sock, select.POLLIN)
-            self.objmap[id(sock)] = (cb, args)
+            self.objmap[0][id(sock)] = (cb, args)
         else:
-            self.poller.register(sock, select.POLLIN)
-            self.objmap[id(sock)] = cb
+            self.objmap[0][id(sock)] = cb
 
     def remove_reader(self, sock):
+        print('remove reader')
         if DEBUG and __debug__:
             log.debug("remove_reader(%s)", sock)
         self.poller.unregister(sock)
-        del self.objmap[id(sock)]
+        del self.objmap[0][id(sock)]
 
     def add_writer(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_writer%s", (sock, cb, args))
+        self.poller.register(sock, select.POLLOUT | select.POLLIN)  # TEST kills writing
         if args:
-            self.poller.register(sock, select.POLLOUT)
-            self.objmap[id(sock)] = (cb, args)
+            self.objmap[1][id(sock)] = (cb, args)
         else:
-            self.poller.register(sock, select.POLLOUT)
-            self.objmap[id(sock)] = cb
+            self.objmap[1][id(sock)] = cb
 
     def remove_writer(self, sock):
+        print('remove writer')
         if DEBUG and __debug__:
             log.debug("remove_writer(%s)", sock)
         try:
             self.poller.unregister(sock)
-            self.objmap.pop(id(sock), None)
+            del self.objmap[1][id(sock)]
         except OSError as e:
             # StreamWriter.awrite() first tries to write to a socket,
             # and if that succeeds, yield IOWrite may never be called
@@ -72,7 +73,8 @@ class PollEventLoop(EventLoop):
         # https://github.com/micropython/micropython/issues/2716 fixed.
         if res:
             for sock, ev in res:
-                cb = self.objmap[id(sock)]
+                idx = 1 if ev & select.POLLOUT else 0
+                cb = self.objmap[idx][id(sock)]
                 if ev & (select.POLLHUP | select.POLLERR):
                     # These events are returned even if not requested, and
                     # are sticky, i.e. will be returned again and again.
