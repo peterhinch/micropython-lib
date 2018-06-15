@@ -21,47 +21,61 @@ class PollEventLoop(EventLoop):
     def __init__(self, runq_len=16, waitq_len=16):
         EventLoop.__init__(self, runq_len, waitq_len)
         self.poller = select.poll()
-        self.objmap = [{}, {}]  # [Read, Write]
+        self.rdobjmap = {}
+        self.wrobjmap = {}
+        self.flags = {}
+
+    # Remove registration of sock for reading or writing.
+    def _unregister(self, sock, objmap, flag):
+        # If StreamWriter.awrite() wrote entire buf on 1st pass sock will never
+        # have been registered. So test for presence in .flags.
+        if id(sock) in self.flags:
+            flags = self.flags[id(sock)]
+            if flags & flag:  # flag is currently registered
+                flags &= ~flag
+                if flags:
+                    self.flags[id(sock)] = flags
+                    self.poller.register(sock, flags)
+                else:
+                    del self.flags[id(sock)]
+                    self.poller.unregister(sock)
+                del objmap[id(sock)]
+
+    # Additively register sock for reading or writing
+    def _register(self, sock, flag):
+        if id(sock) in self.flags:
+            self.flags[id(sock)] |= flag
+        else:
+            self.flags[id(sock)] = flag
+        self.poller.register(sock, self.flags[id(sock)])
 
     def add_reader(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_reader%s", (sock, cb, args))
-        self.poller.register(sock, select.POLLIN)
+        self._register(sock, select.POLLIN)
         if args:
-            self.objmap[0][id(sock)] = (cb, args)
+            self.rdobjmap[id(sock)] = (cb, args)
         else:
-            self.objmap[0][id(sock)] = cb
+            self.rdobjmap[id(sock)] = cb
 
     def remove_reader(self, sock):
-        print('remove reader')
         if DEBUG and __debug__:
             log.debug("remove_reader(%s)", sock)
-        self.poller.unregister(sock)
-        del self.objmap[0][id(sock)]
+        self._unregister(sock, self.rdobjmap, select.POLLIN)
 
     def add_writer(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_writer%s", (sock, cb, args))
-        self.poller.register(sock, select.POLLOUT | select.POLLIN)  # TEST kills writing
+        self._register(sock, select.POLLOUT)
         if args:
-            self.objmap[1][id(sock)] = (cb, args)
+            self.wrobjmap[id(sock)] = (cb, args)
         else:
-            self.objmap[1][id(sock)] = cb
+            self.wrobjmap[id(sock)] = cb
 
     def remove_writer(self, sock):
-        print('remove writer')
         if DEBUG and __debug__:
             log.debug("remove_writer(%s)", sock)
-        try:
-            self.poller.unregister(sock)
-            del self.objmap[1][id(sock)]
-        except OSError as e:
-            # StreamWriter.awrite() first tries to write to a socket,
-            # and if that succeeds, yield IOWrite may never be called
-            # for that socket, and it will never be added to poller. So,
-            # ignore such error.
-            if e.args[0] != uerrno.ENOENT:
-                raise
+        self._unregister(sock, self.wrobjmap, select.POLLOUT)
 
     def wait(self, delay):
         if DEBUG and __debug__:
@@ -69,12 +83,22 @@ class PollEventLoop(EventLoop):
         # We need one-shot behavior (second arg of 1 to .poll())
         res = self.poller.ipoll(delay, 1)
         #log.debug("poll result: %s", res)
-        # Remove "if res" workaround after
-        # https://github.com/micropython/micropython/issues/2716 fixed.
-        if res:
-            for sock, ev in res:
-                idx = 1 if ev & select.POLLOUT else 0
-                cb = self.objmap[idx][id(sock)]
+        for sock, ev in res:
+            if ev & select.POLLOUT:
+                cb = self.wrobjmap[id(sock)]
+                # Test code. Invalidate objmap: this ensures an exception is thrown
+                # rather than exhibiting weird behaviour when testing.
+                self.wrobjmap[id(sock)] = None  # TEST
+                if DEBUG and __debug__:
+                    log.debug("Calling IO callback: %r", cb)
+                if isinstance(cb, tuple):
+                    cb[0](*cb[1])
+                else:
+                    cb.pend_throw(None)
+                    self.call_soon(cb)
+            if ev & select.POLLIN:
+                cb = self.rdobjmap[id(sock)]
+                self.rdobjmap[id(sock)] = None  # TEST
                 if ev & (select.POLLHUP | select.POLLERR):
                     # These events are returned even if not requested, and
                     # are sticky, i.e. will be returned again and again.
@@ -108,8 +132,7 @@ class StreamReader:
             # This should not happen for real sockets, but can easily
             # happen for stream wrappers (ssl, websockets, etc.)
             #log.warn("Empty read")
-        if not res:
-            yield IOReadDone(self.polls)
+        yield IOReadDone(self.polls)
         return res
 
     def readexactly(self, n):
@@ -119,10 +142,10 @@ class StreamReader:
             res = self.ios.read(n)
             assert res is not None
             if not res:
-                yield IOReadDone(self.polls)
                 break
             buf += res
             n -= len(res)
+        yield IOReadDone(self.polls)
         return buf
 
     def readline(self):
@@ -134,13 +157,13 @@ class StreamReader:
             res = self.ios.readline()
             assert res is not None
             if not res:
-                yield IOReadDone(self.polls)
                 break
             buf += res
             if buf[-1] == 0x0a:
                 break
         if DEBUG and __debug__:
             log.debug("StreamReader.readline(): %s", buf)
+        yield IOReadDone(self.polls)
         return buf
 
     def aclose(self):
@@ -173,6 +196,7 @@ class StreamWriter:
             if res == sz:
                 if DEBUG and __debug__:
                     log.debug("StreamWriter.awrite(): completed spooling %d bytes", res)
+                yield IOWriteDone(self.s)
                 return
             if res is None:
                 res = 0
