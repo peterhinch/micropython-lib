@@ -14,53 +14,68 @@ def set_debug(val):
         import logging
         log = logging.getLogger("uasyncio")
 
-
+# add_writer causes read failure if passed the same sock instance as was passed
+# to add_reader. Cand we fix this by maintaining two object maps?
 class PollEventLoop(EventLoop):
 
     def __init__(self, runq_len=16, waitq_len=16, fast_io=0):
         EventLoop.__init__(self, runq_len, waitq_len, fast_io)
         self.poller = select.poll()
-        self.objmap = {}
+        self.rdobjmap = {}
+        self.wrobjmap = {}
+        self.flags = {}
+
+    # Remove registration of sock for reading or writing.
+    def _unregister(self, sock, objmap, flag):
+        # If StreamWriter.awrite() wrote entire buf on 1st pass sock will never
+        # have been registered. So test for presence in .flags.
+        if id(sock) in self.flags:
+            flags = self.flags[id(sock)]
+            if flags & flag:  # flag is currently registered
+                flags &= ~flag
+                if flags:
+                    self.flags[id(sock)] = flags
+                    self.poller.register(sock, flags)
+                else:
+                    del self.flags[id(sock)]
+                    self.poller.unregister(sock)
+                del objmap[id(sock)]
+
+    # Additively register sock for reading or writing
+    def _register(self, sock, flag):
+        if id(sock) in self.flags:
+            self.flags[id(sock)] |= flag
+        else:
+            self.flags[id(sock)] = flag
+        self.poller.register(sock, self.flags[id(sock)])
 
     def add_reader(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_reader%s", (sock, cb, args))
+        self._register(sock, select.POLLIN)
         if args:
-            self.poller.register(sock, select.POLLIN)
-            self.objmap[id(sock)] = (cb, args)
+            self.rdobjmap[id(sock)] = (cb, args)
         else:
-            self.poller.register(sock, select.POLLIN)
-            self.objmap[id(sock)] = cb
+            self.rdobjmap[id(sock)] = cb
 
     def remove_reader(self, sock):
         if DEBUG and __debug__:
             log.debug("remove_reader(%s)", sock)
-        self.poller.unregister(sock)
-        del self.objmap[id(sock)]
+        self._unregister(sock, self.rdobjmap, select.POLLIN)
 
     def add_writer(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_writer%s", (sock, cb, args))
+        self._register(sock, select.POLLOUT)
         if args:
-            self.poller.register(sock, select.POLLOUT)
-            self.objmap[id(sock)] = (cb, args)
+            self.wrobjmap[id(sock)] = (cb, args)
         else:
-            self.poller.register(sock, select.POLLOUT)
-            self.objmap[id(sock)] = cb
+            self.wrobjmap[id(sock)] = cb
 
     def remove_writer(self, sock):
         if DEBUG and __debug__:
             log.debug("remove_writer(%s)", sock)
-        try:
-            self.poller.unregister(sock)
-            self.objmap.pop(id(sock), None)
-        except OSError as e:
-            # StreamWriter.awrite() first tries to write to a socket,
-            # and if that succeeds, yield IOWrite may never be called
-            # for that socket, and it will never be added to poller. So,
-            # ignore such error.
-            if e.args[0] != uerrno.ENOENT:
-                raise
+        self._unregister(sock, self.wrobjmap, select.POLLOUT)
 
     def wait(self, delay):
         if DEBUG and __debug__:
@@ -69,21 +84,35 @@ class PollEventLoop(EventLoop):
         res = self.poller.ipoll(delay, 1)
         #log.debug("poll result: %s", res)
         for sock, ev in res:
-            cb = self.objmap[id(sock)]
-            if ev & (select.POLLHUP | select.POLLERR):
-                # These events are returned even if not requested, and
-                # are sticky, i.e. will be returned again and again.
-                # If the caller doesn't do proper error handling and
-                # unregister this sock, we'll busy-loop on it, so we
-                # as well can unregister it now "just in case".
-                self.remove_reader(sock)
-            if DEBUG and __debug__:
-                log.debug("Calling IO callback: %r", cb)
-            if isinstance(cb, tuple):
-                cb[0](*cb[1])
-            else:
-                cb.pend_throw(None)
-                self._call_io(cb)
+            if ev & select.POLLOUT:
+                cb = self.wrobjmap[id(sock)]
+                # Test code. Invalidate objmap: this ensures an exception is thrown
+                # rather than exhibiting weird behaviour when testing.
+                self.wrobjmap[id(sock)] = None  # TEST
+                if DEBUG and __debug__:
+                    log.debug("Calling IO callback: %r", cb)
+                if isinstance(cb, tuple):
+                    cb[0](*cb[1])
+                else:
+                    cb.pend_throw(None)
+                    self._call_io(cb)
+            if ev & select.POLLIN:
+                cb = self.rdobjmap[id(sock)]
+                self.rdobjmap[id(sock)] = None  # TEST
+                if ev & (select.POLLHUP | select.POLLERR):
+                    # These events are returned even if not requested, and
+                    # are sticky, i.e. will be returned again and again.
+                    # If the caller doesn't do proper error handling and
+                    # unregister this sock, we'll busy-loop on it, so we
+                    # as well can unregister it now "just in case".
+                    self.remove_reader(sock)
+                if DEBUG and __debug__:
+                    log.debug("Calling IO callback: %r", cb)
+                if isinstance(cb, tuple):
+                    cb[0](*cb[1])
+                else:
+                    cb.pend_throw(None)
+                    self._call_io(cb)
 
 
 class StreamReader:
@@ -103,8 +132,7 @@ class StreamReader:
             # This should not happen for real sockets, but can easily
             # happen for stream wrappers (ssl, websockets, etc.)
             #log.warn("Empty read")
-        if not res:
-            yield IOReadDone(self.polls)
+        yield IOReadDone(self.polls)
         return res
 
     def readexactly(self, n):
@@ -114,10 +142,10 @@ class StreamReader:
             res = self.ios.read(n)
             assert res is not None
             if not res:
-                yield IOReadDone(self.polls)
                 break
             buf += res
             n -= len(res)
+        yield IOReadDone(self.polls)
         return buf
 
     def readline(self):
@@ -129,13 +157,13 @@ class StreamReader:
             res = self.ios.readline()
             assert res is not None
             if not res:
-                yield IOReadDone(self.polls)
                 break
             buf += res
             if buf[-1] == 0x0a:
                 break
         if DEBUG and __debug__:
             log.debug("StreamReader.readline(): %s", buf)
+        yield IOReadDone(self.polls)
         return buf
 
     def aclose(self):
@@ -168,6 +196,7 @@ class StreamWriter:
             if res == sz:
                 if DEBUG and __debug__:
                     log.debug("StreamWriter.awrite(): completed spooling %d bytes", res)
+                yield IOWriteDone(self.s)
                 return
             if res is None:
                 res = 0
