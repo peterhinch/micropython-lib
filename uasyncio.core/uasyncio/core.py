@@ -26,11 +26,11 @@ class TimeoutError(CancelledError):
 
 class EventLoop:
 
-    def __init__(self, runq_len=16, waitq_len=16, fast_io=0):
+    def __init__(self, runq_len=16, waitq_len=16, ioq_len=0):
         self.runq = ucollections.deque((), runq_len, True)
-        self.fast_io = fast_io
-        if fast_io:
-            self.ioq = ucollections.deque((), fast_io, True)
+        self.ioq_len = ioq_len
+        if ioq_len:
+            self.ioq = ucollections.deque((), ioq_len, True)
             self._call_io = self._call_now
         else:
             self._call_io = self.call_soon
@@ -103,8 +103,8 @@ class EventLoop:
                 log.debug("Entries in runq: %d", l)
             cur_q = self.runq  # Default: always get tasks from runq
             dl = 1
-            while l or self.fast_io:
-                if self.fast_io:
+            while l or self.ioq_len:
+                if self.ioq_len:
                     self.wait(0)  # Schedule I/O. Can append to ioq.
                     if self.ioq:
                         cur_q = self.ioq
@@ -247,10 +247,10 @@ class IOWriteDone(SysCall1):
 
 _event_loop = None
 _event_loop_class = EventLoop
-def get_event_loop(runq_len=16, waitq_len=16, fast_io=False):
+def get_event_loop(runq_len=16, waitq_len=16, ioq_len=0):
     global _event_loop
     if _event_loop is None:
-        _event_loop = _event_loop_class(runq_len, waitq_len, fast_io)
+        _event_loop = _event_loop_class(runq_len, waitq_len, ioq_len)
     return _event_loop
 
 def sleep(secs):
