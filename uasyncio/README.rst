@@ -1,6 +1,6 @@
-Repository: https://github.com/peterhinch/micropython-lib
-Branch: uasyncio-io-fast-and-rw
-Docs: https://github.com/peterhinch/micropython-async
+* Repository: https://github.com/peterhinch/micropython-lib
+* Branch: uasyncio-io-fast-and-rw
+* Docs: https://github.com/peterhinch/micropython-async
 
 This version contains:
 
