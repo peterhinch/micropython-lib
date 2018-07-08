@@ -1,3 +1,14 @@
+Repository: https://github.com/peterhinch/micropython-lib
+Branch: uasyncio-io-fast-and-rw
+Docs: https://github.com/peterhinch/micropython-async
+
+This version contains:
+
+* Option to assign an I/O queue to reduce I/O latency.
+* Fix to bug which can cause read/write I/O devices to fail.
+* Assertion fail if create_task or run_until_complete are called
+  with a generator function (to ease diagnosing a common error).
+
 uasyncio
 ========
 
