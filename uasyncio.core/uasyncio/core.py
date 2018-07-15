@@ -1,4 +1,10 @@
-import utime as time
+# uasyncio.core fast_io
+# fork: peterhinch/micropython-lib branch: uasyncio-io-fast-and-rw
+version = 'fast_io'
+try:
+    import rtc_time as time # Low power timebase using RTC
+except ImportError:
+    import utime as time
 import utimeq
 import ucollections
 
