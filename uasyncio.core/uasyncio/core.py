@@ -1,5 +1,13 @@
 # uasyncio.core fast_io
+# (c) 2014-2018 Paul Sokolovsky. MIT license.
+
+# This is a fork of official MicroPython uasynco. It is recommended to use
+# the official version unless the specific features of this fork are required.
+
+# Changes copyright (c) Peter Hinch 2018
+# Code at https://github.com/peterhinch/micropython-async.git
 # fork: peterhinch/micropython-lib branch: uasyncio-io-fast-and-rw
+
 version = 'fast_io'
 try:
     import rtc_time as time # Low power timebase using RTC
@@ -264,10 +272,10 @@ class EventLoop:
     def run_until_complete(self, coro):
         assert not isinstance(coro, type_genf), 'Coroutine arg expected.'  # upy issue #3241
         def _run_and_stop():
-            yield from coro
-            yield StopLoop(0)
+            ret = yield from coro # https://github.com/micropython/micropython-lib/pull/270
+            yield StopLoop(ret)
         self.call_soon(_run_and_stop())
-        self.run_forever()
+        return self.run_forever()
 
     def stop(self):
         self.call_soon((lambda: (yield StopLoop(0)))())
