@@ -164,6 +164,19 @@ class StreamReader:
         # PollEventLoop._unregister
         return res  # Next iteration raises StopIteration and returns result
 
+    def readinto(self, buf, n=0):  # See comments in .read
+        while True:
+            yield IORead(self.polls)
+            if n:
+                res = self.ios.readinto(buf, n)  # Call device's readinto method
+            else:
+                res = self.ios.readinto(buf)
+            if res is not None:
+                break
+            #log.warn("Empty read")
+        yield IOReadDone(self.polls)
+        return res
+
     def readexactly(self, n):
         buf = b""
         while n:

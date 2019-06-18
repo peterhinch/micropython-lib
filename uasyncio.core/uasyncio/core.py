@@ -8,7 +8,7 @@
 # Code at https://github.com/peterhinch/micropython-async.git
 # fork: peterhinch/micropython-lib branch: uasyncio-io-fast-and-rw
 
-version = ('fast_io', '0.24')
+version = ('fast_io', '0.25')
 try:
     import rtc_time as time  # Low power timebase using RTC
 except ImportError:
@@ -342,7 +342,12 @@ def get_event_loop(runq_len=16, waitq_len=16, ioq_len=0, lp_len=0):
     return _event_loop
 
 # Allow user classes to determine prior event loop instantiation.
-def got_event_loop():
+def get_running_loop():
+    if _event_loop is None:
+        raise RuntimeError('Event loop not instantiated')
+    return _event_loop
+
+def got_event_loop():  # Kept to avoid breaking code
     return _event_loop is not None
 
 def sleep(secs):
