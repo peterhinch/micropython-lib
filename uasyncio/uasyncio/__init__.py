@@ -61,8 +61,11 @@ class PollEventLoop(EventLoop):
     def add_reader(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_reader%s", (sock, cb, args))
+        # HACK This should read
+        # self._register(sock, select.POLLIN)
+        # Temporary workround for https://github.com/micropython/micropython/issues/5172
+        # The following is not compliant with POSIX or with the docs
         self._register(sock, select.POLLIN | select.POLLHUP | select.POLLERR)  # t35tB0t add HUP and ERR to force LWIP revents
-        #self._register(sock, select.POLLIN)
         if args:
             self.rdobjmap[id(sock)] = (cb, args)
         else:
@@ -76,6 +79,10 @@ class PollEventLoop(EventLoop):
     def add_writer(self, sock, cb, *args):
         if DEBUG and __debug__:
             log.debug("add_writer%s", (sock, cb, args))
+        # HACK Should read
+        # self._register(sock, select.POLLOUT)
+        # Temporary workround for https://github.com/micropython/micropython/issues/5172
+        # The following is not compliant with POSIX or with the docs
         self._register(sock, select.POLLOUT | select.POLLHUP | select.POLLERR)  # t35tB0t add HUP and ERR to force LWIP revents
         if args:
             self.wrobjmap[id(sock)] = (cb, args)
@@ -192,8 +199,7 @@ class StreamReader:
                 # socket may be in HUP or ERR state, so loop back ask poller
                 continue
             else:
-                if not res:
-  # All done
+                if not res:  # All done
                     break
                 buf += res
                 n -= len(res)
